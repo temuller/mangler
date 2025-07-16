@@ -1,0 +1,38 @@
+# ZTF
+ztf::g:
+  colour: 'green'
+  marker: 'o'
+ztf::r:
+  colour: 'red'
+  marker: 'o'
+ztf::i:
+  colour: 'gold'
+  marker: 'o'
+# CSP (custom names from custom_registry.py)
+csp::u:
+  colour: 'purple'
+  marker: 'o'
+csp::b:
+  colour: 'blue'
+  marker: 'o'
+csp::v:
+  colour: 'limegreen'
+  marker: 'o'
+csp::g:
+  colour: 'green'
+  marker: 'o'
+csp::r:
+  colour: 'red'
+  marker: 'o'
+csp::i:
+  colour: 'gold'
+  marker: 'o'
+csp::y:
+  colour: 'olive'
+  marker: 'o'
+csp::j:
+  colour: 'grey'
+  marker: 'o'
+csp::h:
+  colour: 'slateblue'
+  marker: 'o'

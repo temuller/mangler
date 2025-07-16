@@ -1,0 +1,8 @@
+numpy
+pandas
+matplotlib
+sncosmo
+iminuit
+tinygp
+jaxopt
+ipympl

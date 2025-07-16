@@ -1,0 +1,502 @@
+import yaml
+import warnings
+import numpy as np
+import pandas as pd
+from pathlib import Path
+import matplotlib.pyplot as plt
+from functools import partial
+
+import sncosmo
+from astropy.table import Table
+
+import mangler
+from mangler.sed import SED
+from mangler.photometry import Photometry
+from mangler.gp_fit import fit_gp_model, gp_predict
+
+plt.rcParams["font.family"] = "P052"
+plt.rcParams['mathtext.fontset'] = "cm"
+
+###############
+# Plot Config #
+###############
+mangler_dir = Path(mangler.__path__[0])
+with open(mangler_dir / 'filters.yml', 'r') as file:
+    filters_config = yaml.safe_load(file)
+    
+class SEDMangler(object):
+    """Object for building a colour-matched SED model.
+    """
+    def __init__(self, 
+                 data: str | pd.DataFrame | Table,
+                 z: float,
+                 mwebv: float = 0.0, 
+                 phase_range: tuple[float, float] = (-10, 90),
+                ):
+        """
+        Parameters
+        ----------
+        data: supernova photometry in sncosmo format.
+        z: redshift.
+        mwebv: Milky-Way dust extinction.
+        phase_range: phase range to be used for the SED model. 
+        """
+        self.z = z
+        self.mwebv = mwebv
+        self.phase_range = phase_range
+        self.phot = Photometry(data)
+        self.bands = np.unique(self.phot.band)
+        self.source = 'stretched-hsiao'
+        self.sed = SED(self.source, z, mwebv, phase_range, np.unique(self.bands))
+        # get the inital colour-stretch of the SED model
+        self.st = np.copy(self.sed.st)
+        # initial fit; this sets t0 and sBV
+        self.fit_model()
+        
+    def _setup_phase_range(self):
+        """Sets up the rest-frame phase range of the object.
+        
+        Note: this considers both the range of the photometry and 
+        SED source model.
+        """
+        self.phot.phase = (self.phot.time - self.t0) / (1 + self.z)
+        # consider limits of the SED model
+        min_phase = np.floor(np.max([self.phase_range[0],
+                                     self.sed.rest_model.mintime() / self.sed.scale]
+                                    )
+                             )
+        max_phase = np.ceil(np.min([self.phase_range[1], 
+                                    self.sed.rest_model.maxtime() / self.sed.scale]
+                                   )
+                            )
+        # rest-frame phases
+        self.pred_phase = np.arange(min_phase, max_phase + 0.1, 0.1)
+
+    def mangle_sed(self, k1: str = 'ExpSquared', fit_mean: bool = True, 
+                   time_scale: float = None, wave_scale: float = None):
+        """Modifies the SED model to match the observations using Gaussian Process (GP) 
+        regression.
+
+        Parameters
+        ----------
+        k1: GP kernel for the time axis.
+        fit_mean: whether to fit a mean function (constant).
+        """   
+        # get phase range to use 
+        self.phase_mask = ((self.pred_phase.min() <= self.phot.phase) & 
+                        (self.phot.phase <=  self.pred_phase.max()
+                            )
+                        )
+        # flux ratios between observations and (observer-frame) SED model
+        model_flux = self.sed.model.bandflux(self.phot.band, 
+                                            self.phot.phase * (1 + self.z),
+                                            zp=self.phot.zp, 
+                                            zpsys=self.phot.zpsys)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            self.ratio_flux = self.phot.flux / model_flux
+            self.ratio_error = self.phot.flux_err / model_flux
+        # fit mangling surface in observer frame
+        # phases in observer frame
+        self.gp_model = fit_gp_model(self.phot.phase[self.phase_mask] * (1 + self.z), 
+                                    self.phot.eff_wave[self.phase_mask] * (1 + self.z), 
+                                    self.ratio_flux[self.phase_mask], 
+                                    self.ratio_error[self.phase_mask], 
+                                    k1=k1, fit_mean=fit_mean, 
+                                    time_scale=time_scale,wave_scale=wave_scale)
+        # store the model for later predictions (easy use when needed)
+        self.gp_predict = partial(gp_predict, 
+                                ratio_pred=self.ratio_flux[self.phase_mask],
+                                error_pred=self.ratio_error[self.phase_mask],
+                                gp_model=self.gp_model,
+                                )
+        # get colour-stretch
+        st, st_err = self.calculate_colour("csp::b", "csp::v", return_st=True, plot=False)
+        self.st, self.st_err = st, st_err
+
+    def plot_fit(self):
+        """Plots the light-curve fit and ratio between the observations and SED.
+        """
+        # phase range to use
+        pred_rest_phase = self.pred_phase.copy()
+        pred_obs_phase = pred_rest_phase * (1 + self.z)
+        
+        fig, ax = plt.subplots(2, 1, height_ratios=(3, 1), gridspec_kw={"hspace":0})
+        for band in self.bands:
+            band_mask = self.phot.band == band
+            mask = self.phase_mask & band_mask
+            # apply mask
+            time = self.phot.time[mask]
+            flux, flux_err = self.phot.flux[mask], self.phot.flux_err[mask]
+            zp, zpsys = self.phot.zp[mask], self.phot.zpsys[mask]
+            eff_wave = sncosmo.get_bandpass(band).wave_eff
+            # ratios
+            ratio_flux = self.ratio_flux[mask]
+            ratio_error = self.ratio_error[mask]
+            
+            ########################
+            # observer-frame model #
+            ########################            
+            pred_obs_wave = np.array([eff_wave * (1 + self.z)] * len(pred_obs_phase))
+            obs_ratio_fit, obs_var_fit = self.gp_predict(pred_obs_phase, 
+                                                         pred_obs_wave)
+            obs_std_fit = np.sqrt(obs_var_fit)
+            # mangled light curves
+            obs_model_flux = self.sed.model.bandflux(band, 
+                                                     pred_obs_phase, 
+                                                     zp=zp[0], 
+                                                     zpsys=zpsys[0])
+            obs_kcorr_flux = obs_model_flux * obs_ratio_fit
+            obs_kcorr_error = obs_model_flux * obs_std_fit
+
+            ########
+            # Plot #
+            ########
+            if band in filters_config.keys():
+                colour = filters_config[band]['colour']
+                marker = filters_config[band]['marker']
+            else:
+                colour = marker = None
+            # data
+            ax[0].errorbar(time, flux, flux_err, 
+                           ls="", marker=marker, color=colour, label=band)
+            # model
+            ax[0].plot(pred_obs_phase + self.t0, obs_kcorr_flux, color=colour)
+            ax[0].fill_between(pred_obs_phase + self.t0, 
+                               obs_kcorr_flux - obs_kcorr_error, 
+                               obs_kcorr_flux + obs_kcorr_error, 
+                               alpha=0.2,
+                               color=colour)
+        
+            # residuals
+            norm = np.average(ratio_flux, weights=1 / ratio_error ** 2)  # for plotting only
+            # ratio
+            ax[1].errorbar(time, ratio_flux / norm, ratio_error / norm, 
+                           ls="", marker=marker, color=colour)
+            # fit
+            ax[1].plot(pred_obs_phase + self.t0, obs_ratio_fit / norm, color=colour)
+            ax[1].fill_between(pred_obs_phase + self.t0, 
+                               (obs_ratio_fit - obs_std_fit) / norm, 
+                               (obs_ratio_fit + obs_std_fit) / norm, 
+                               alpha=0.2, color=colour)
+            
+            # config
+            ax[0].set_ylabel(r'$F_{\lambda}$', fontsize=16)
+            ax[1].set_xlabel(r'Observer-frame time', fontsize=16)
+            ax[1].set_ylabel(r'$F_{\lambda}^{\rm data} / F_{\lambda}^{\rm SED}$', 
+                             fontsize=16)
+            ax[0].set_title(f'"{self.source}" SED source (z={self.z})', fontsize=16)
+            for i in range(2):
+                ax[i].tick_params('both', labelsize=14)
+            ax[0].set_xticklabels([])
+        ax[0].legend(fontsize=14, framealpha=0)
+        plt.show()
+        
+    def plot_lightcurves(self):
+        """Plots the rest-frame light-curves from the mangled SED.
+        """
+        # phase range to use
+        pred_rest_phase = self.pred_phase.copy()
+        pred_obs_phase = pred_rest_phase * (1 + self.z)
+        
+        fig, ax = plt.subplots()
+        for band in self.bands:
+            band_mask = self.phot.band == band
+            mask = self.phase_mask & band_mask
+            # apply mask
+            zp, zpsys = self.phot.zp[mask], self.phot.zpsys[mask]
+            eff_wave = sncosmo.get_bandpass(band).wave_eff
+
+            ####################
+            # rest-frame model #
+            ####################
+            pred_rest_wave = np.array([eff_wave] * len(pred_rest_phase))
+            rest_ratio_fit, rest_var_fit = self.gp_predict(pred_obs_phase, pred_rest_wave)
+            rest_std_fit = np.sqrt(rest_var_fit)
+            # mangle SED
+            rest_model_flux = self.sed.rest_model.bandflux(band, 
+                                                           pred_rest_phase, 
+                                                           zp=zp[0], 
+                                                           zpsys=zpsys[0])
+            rest_kcorr_flux = rest_model_flux * rest_ratio_fit
+            rest_kcorr_error = rest_model_flux * rest_std_fit
+
+            ########
+            # Plot #
+            ########
+            if band in filters_config.keys():
+                colour = filters_config[band]['colour']
+            else:
+                colour = None
+            # model
+            ax.plot(pred_rest_phase, rest_kcorr_flux, color=colour, label=band)
+            ax.fill_between(pred_rest_phase, 
+                            rest_kcorr_flux - rest_kcorr_error, 
+                            rest_kcorr_flux + rest_kcorr_error, 
+                            alpha=0.2,
+                            color=colour)
+            
+            # config
+            ax.set_ylabel(r'$F_{\lambda}$', fontsize=16)
+            ax.set_xlabel(r'Rest-frame days since $t_0$', fontsize=16)
+            ax.set_title(f'"{self.source}" SED source (z={self.z})', fontsize=16)
+            ax.tick_params('both', labelsize=14)
+        ax.legend(fontsize=14, framealpha=0)
+        plt.show()
+        
+    def plot_surface(self, minphase: float = None, maxphase: float = None, minwave: float = None, maxwave: float = None, 
+                     delta_phase: float = 2, delta_wave: float = 30, alpha: float = 1.):
+        """Plots the mangled SED in the observer frame.
+        
+        Note: if running on jupyter lab, it is recommended to run with ipympl for an
+        interactive plot (ipympl package required)
+        >>> %matplotlib ipympl
+        >>> sedm.plot_surface()
+
+        Parameters
+        ----------
+        minphase: Minimum phase to plot.
+        maxphase: Maximum phase to plot.
+        minwave: Minimum wavelength to plot.
+        maxwave: Maximum wavelength to plot.
+        delta_phase: Step in the phase axis.
+        delta_wave: Step in the wavelength axis.
+        alpha: Transparency of the surface.
+        """
+        if minwave is None:
+            minwave = self.sed.minwave
+        if maxwave is None:
+            maxwave = self.sed.maxwave
+        if minphase is None:
+            minphase = self.sed.phase_range[0]
+        if maxphase is None:
+            maxphase = self.sed.phase_range[1]
+
+        obs_phases = np.arange(minphase, maxphase + delta_phase, delta_phase) * (1 + self.z)
+        obs_waves = np.arange(minwave, maxwave + delta_wave, delta_wave)
+
+        FLUXES = self.sed.model.flux(obs_phases, obs_waves)
+        PHASES, WAVES = np.meshgrid(obs_phases, obs_waves)
+
+        # mangle the SED
+        mang_list = []
+        for phase in obs_phases:
+            pred_phases = np.array([phase] * len(obs_waves))
+            mang_epoch, _ = self.gp_predict(pred_phases, obs_waves)
+            mang_list.append(mang_epoch)
+        mangling_surface = np.array(mang_list)
+        FLUXES *=  mangling_surface  # mangling
+
+        fig, ax = plt.subplots(subplot_kw={"projection": "3d"})
+
+        # Plot the 3D surface
+        ax.plot_surface(PHASES, WAVES, FLUXES.T, edgecolor='royalblue', 
+                        lw=0.5, rstride=8, cstride=8, alpha=alpha)
+
+        #ax.scatter(sedm.phot.phase * (1 + sedm.z), sedm.phot.eff_wave, sedm.phot.flux, s=40, c='k')
+
+        # Plot projections on the 'walls' of the graph.
+        ax.contour(PHASES, WAVES, FLUXES.T, zdir='x', offset=obs_phases.min(), cmap='viridis_r')
+        ax.contour(PHASES, WAVES, FLUXES.T, zdir='y', offset=obs_waves.max(), cmap='coolwarm')
+
+        ax.set(xlim=(obs_phases.min(), obs_phases.max()), ylim=(obs_waves.min(), obs_waves.max()),
+            xlabel='Observer-frame time', ylabel=r'Observer-frame wavelength ($\AA$)', zlabel=r'$F_{\lambda}$')
+        plt.tight_layout()
+        plt.show()
+
+    def calculate_colour(self, band1: str, band2: str, zp: float = 30, zpsys: str = 'ab', 
+                         return_st: bool = False, plot: bool = True):
+        """Calculates rest-frame colour using the colour-matched SED.
+
+        Note: Colour = band1 - band2
+        
+        Parameters
+        ----------
+        band1: First band.
+        band2: Second band.
+        zp: Zeropoint for both bands. Only used if the photometry does not 
+            include any of the given bands.
+        zpsys: Magnitude system for both bands. Only used if the photometry
+            does not  include any of the given bands.
+        set_st: Whether to return the colour-stretch parameter.
+        plot: Whether to plot the colour curve.
+
+        Results
+        -------
+        colour: Colour curve.
+        colour_err: Uncertainty.
+        """
+        # phase range to use
+        pred_rest_phase = self.pred_phase.copy()
+        pred_obs_phase = pred_rest_phase * (1 + self.z)
+
+        if (band1 not in self.phot.band) | (band2 not in self.phot.band):
+            eff_wave1 = sncosmo.get_bandpass(band1).wave_eff
+            eff_wave2 = sncosmo.get_bandpass(band2).wave_eff
+            zp1 = zp2 = zp
+            zpsys1 = zpsys2 = zpsys
+        else:
+            # create band and phase mask
+            band_mask1 = self.phot.band == band1
+            band_mask2 = self.phot.band == band2
+            mask1 = self.phase_mask & band_mask1
+            mask2 = self.phase_mask & band_mask2
+            # apply mask
+            eff_wave1 = self.phot.eff_wave[mask1][0]
+            eff_wave2 = self.phot.eff_wave[mask2][0]
+            zp1 = self.phot.zp[mask1][0]
+            zp2 = self.phot.zp[mask2][0]
+            zpsys1 = self.phot.zpsys[mask1][0]
+            zpsys2 = self.phot.zpsys[mask2][0]
+        
+        # wavelength array
+        pred_rest_wave = np.array([eff_wave1] * len(pred_obs_phase) + 
+                                  [eff_wave2] * len(pred_obs_phase) 
+                                  )
+        # flux array
+        rest_model_flux1 = self.sed.rest_model.bandflux(band1, 
+                                                        pred_rest_phase, 
+                                                        zp=zp1, 
+                                                        zpsys=zpsys1)
+        rest_model_flux2 = self.sed.rest_model.bandflux(band2, 
+                                                        pred_rest_phase, 
+                                                        zp=zp2, 
+                                                        zpsys=zpsys2)
+        rest_model_flux = np.r_[rest_model_flux1, rest_model_flux2]
+        # K-corr. predict
+        pred_obs_phase_ = np.r_[pred_obs_phase, pred_obs_phase]
+        ratio_fit, cov_fit = self.gp_predict(pred_obs_phase_, pred_rest_wave, return_cov=True)
+        rest_kcorr_flux = rest_model_flux * ratio_fit
+        rest_kcorr_cov = np.outer(rest_model_flux, rest_model_flux) * cov_fit
+        self.colour_flux_ratio = rest_kcorr_flux
+        self.colour_flux_cov = rest_kcorr_cov
+        
+        # compute colour
+        self._compute_colour(rest_kcorr_flux, rest_kcorr_cov, zp1, zp2)
+        if plot is True:
+            fig, ax = plt.subplots()
+            ax.plot(pred_rest_phase, self.colour)
+            ax.fill_between(pred_rest_phase, 
+                            self.colour - self.colour_err, 
+                            self.colour + self.colour_err, 
+                            alpha=0.2)
+            ax.set_ylabel(fr'$({band1} - {band2})$ (mag)', fontsize=16)
+            ax.set_xlabel(r'Rest-frame days since $t_0$', fontsize=16)
+            ax.set_title(f'"{self.source}" SED source (z={self.z})', fontsize=16)
+            ax.tick_params('both', labelsize=14)
+            plt.show()
+            
+        if return_st is True:
+            return  self._compute_colour_stretch()
+
+    def _compute_colour(self, fluxes: np.ndarray, cov: np.ndarray, 
+                        zp1: float | np.ndarray, zp2: float | np.ndarray):
+        """Computes the colour curve from concatenated flux arrays from two bands.
+
+        Note: flux = [flux1_0, flux1_1, ...flux1_N, # band1
+                      flux2_N+1, flux2_N+2, ...flux2_2N]  # band2
+        Parameters
+        ----------
+        flux: Flux from two bands.
+        cov: Covariance from two bands.
+        zp1: Zero point of first band.
+        zp2: Zero point of second band.
+        """
+        N = fluxes.shape[0] // 2
+        f1 = fluxes[:N]
+        f2 = fluxes[N:]
+        # variance and covariance
+        cov_11 = cov[:N, :N]
+        cov_22 = cov[N:, N:]
+        cov_12 = cov[:N, N:]
+        
+        # error propagation
+        prefactor = 2.5 / np.log(10)
+        var_colour = (
+            (np.diag(cov_11) / (f1 ** 2)) +
+            (np.diag(cov_22) / (f2 ** 2)) -
+            2 * np.diag(cov_12) / (f1 * f2)
+        ) * (prefactor ** 2)
+
+        colour = -2.5 * np.log10(f1 / f2) + (zp1 - zp2)
+        colour_err = np.sqrt(var_colour)
+        self.colour, self.colour_err = colour, colour_err
+
+    def _compute_colour_stretch(self):
+        """Computes the colour stretch parameter for the bands used 
+        in the colour curve calculation.
+        """
+        idmax = np.argmax(self.colour)
+        st_phase = self.pred_phase[idmax]
+
+        # monte-carlo sampling to estimate the standard deviation
+        # use a constrained phase range
+        mask = (st_phase - 9 < self.pred_phase) & (self.pred_phase < st_phase + 9)  
+        pred_phase = self.pred_phase[mask]
+        length = len(self.colour[mask])
+        colours = np.random.normal(self.colour[mask], 
+                                self.colour_err[mask], 
+                                size=(10000, length)
+                                )
+        # calculate the standard deviation
+        st_list = []
+        for colour in colours:
+            st_idx = np.argmax(colour)
+            st_list.append(pred_phase[st_idx])
+        # divided by 30 assuming sBV
+        st, st_err = st_phase / 30, np.std(st_list) / 30
+        return st, st_err
+
+    def _compute_colour_stretch_OLD(self):
+        """Computes the colour stretch parameter for the bands used 
+        in the colour curve calculation.
+        """
+        # colour-stretch between 0.4 and 1.4 translate to phases between 12 and 42 days
+        # assuming sBV...
+        mask = (12 < self.pred_phase) & (self.pred_phase < 42)  
+        pred_phase = self.pred_phase[mask]
+        mask = np.array(list(mask) + list(mask))
+        fluxes = np.random.multivariate_normal(self.colour_flux_ratio[mask], 
+                                               self.colour_flux_cov[np.ix_(mask, mask)], 
+                                               size=1000)
+
+        # calculate mean and std through monte-carlo sampling
+        st_list = []
+        for flux in fluxes:
+            N = len(flux) // 2
+            f1 = flux[:N]
+            f2 = flux[N:]
+            colour = -2.5 * np.log10(f1 / f2)
+            st_idx = np.argmax(colour)
+            st_list.append(pred_phase[st_idx] / 30)
+        self.st, self.st_err = np.mean(st_list), np.std(st_list)
+
+    def fit_model(self):
+        """Fits the Source SED model to the photometry.
+        """
+        # select parameters to fit
+        params_to_exclude = ['z', 'mwebv', 'mwr_v']
+        parameters = [param for param in self.sed.model.param_names 
+                      if param not in params_to_exclude]
+        # fit model
+        result, fitted_model = sncosmo.fit_lc(self.phot.data, 
+                                              self.sed.model, 
+                                              parameters
+                                             )
+        # get t0 and results
+        id_t0 = result.param_names.index("t0")
+        self.t0 = result.parameters[id_t0]
+        self.fitted_model = fitted_model  # for plotting
+        self.result = result
+        # update colour stretch
+        idst = result.param_names.index('sBV')
+        self.st = result.parameters[idst]
+        self.sed.set_st(self.st)
+        self._setup_phase_range()
+        
+    def plot_sncosmo_fit(self):
+        """Plots the sncosmo fit.
+        """
+        sncosmo.plot_lc(self.phot.data, 
+                        model=self.fitted_model, 
+                        errors=self.result.errors)
