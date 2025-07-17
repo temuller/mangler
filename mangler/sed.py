@@ -14,7 +14,6 @@ class SED(object):
                  source: str, 
                  z: float, 
                  mwebv: float = 0.0, 
-                 phase_range: tuple[float, float] = (-10, 90), 
                  bands: list = ['ztf::g', 'ztf::r', 'ztf::i'],
                  mw_dust_law: sncosmo.PropagationEffect = None,
                  **kwargs: dict):
@@ -39,11 +38,9 @@ class SED(object):
         self._set_wavelength_coverage()
         self.colours = {'ztf::g':"green", 'ztf::r':"red", 'ztf::i':"gold"}
         # time range
-        self.phase_range = phase_range
-        self.times = np.arange(self.phase_range[0], 
-                               self.phase_range[1] + 0.1,
-                               0.1
-                              )
+        mintime = np.max([-10, self.rest_model.mintime()])
+        maxtime = np.min([90, self.rest_model.maxtime()])
+        self.times = np.arange(mintime, maxtime + 0.1, 0.1)
         self._set_ref_st()
         self.set_st(self.st_ref)
     
