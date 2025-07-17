@@ -129,17 +129,18 @@ class SEDMangler(object):
         # for phases in rest-frame: give phases in observer frame
         # for wavelength in rest-frame: give wavelength in rest-frame
         self.gp_model = fit_gp_model(self.phot.phase[self.phase_mask] * (1 + self.z), 
-                                    self.phot.eff_wave[self.phase_mask] * (1 + self.z), 
-                                    self.ratio_flux[self.phase_mask], 
-                                    self.ratio_error[self.phase_mask], 
-                                    k1=k1, fit_mean=fit_mean, 
-                                    time_scale=time_scale,wave_scale=wave_scale)
+                                     self.phot.eff_wave[self.phase_mask] * (1 + self.z), 
+                                     self.ratio_flux[self.phase_mask], 
+                                     self.ratio_error[self.phase_mask], 
+                                     k1=k1, fit_mean=fit_mean, 
+                                     time_scale=time_scale,wave_scale=wave_scale
+                                     )
         # store the model for later predictions (easy use when needed)
         self.gp_predict = partial(gp_predict, 
-                                ratio_pred=self.ratio_flux[self.phase_mask],
-                                error_pred=self.ratio_error[self.phase_mask],
-                                gp_model=self.gp_model,
-                                )
+                                  ratio_pred=self.ratio_flux[self.phase_mask],
+                                  error_pred=self.ratio_error[self.phase_mask],
+                                  gp_model=self.gp_model,
+                                  )
         # get colour-stretch
         self.st, self.st_err = self.calculate_colour("csp::b", "csp::v", 
                                                      return_st=True, plot=False)
@@ -494,67 +495,16 @@ class SEDMangler(object):
         ax.legend(fontsize=14, framealpha=0)
         plt.show()
         
-    def plot_lightcurves_OLD(self):
-        """Plots the rest-frame light-curves from the mangled SED.
-        """
-        # phase range to use
-        pred_rest_phase = self.pred_phase.copy()
-        pred_obs_phase = pred_rest_phase * (1 + self.z)
-        
-        fig, ax = plt.subplots()
-        for band in self.bands:
-            # select band and phase range to use
-            band_mask = self.phot.band == band
-            mask = self.phase_mask & band_mask
-            # apply mask
-            zp, zpsys = self.phot.zp[mask], self.phot.zpsys[mask]
-            eff_wave = sncosmo.get_bandpass(band).wave_eff
-
-            ####################
-            # rest-frame model #
-            ####################
-            pred_rest_wave = np.array([eff_wave] * len(pred_rest_phase))
-            rest_ratio_fit, rest_var_fit = self.gp_predict(pred_obs_phase, pred_rest_wave)
-            rest_std_fit = np.sqrt(rest_var_fit)
-            # mangle SED
-            rest_model_flux = self.sed.rest_model.bandflux(band, 
-                                                           pred_rest_phase, 
-                                                           zp=zp[0], 
-                                                           zpsys=zpsys[0])
-            rest_mangled_flux = rest_model_flux * rest_ratio_fit
-            rest_mangled_error = rest_model_flux * rest_std_fit
-
-            ########
-            # Plot #
-            ########
-            if band in filters_config.keys():
-                colour = filters_config[band]['colour']
-            else:
-                colour = None
-            # model
-            ax.plot(pred_rest_phase, rest_mangled_flux, color=colour, label=band)
-            ax.fill_between(pred_rest_phase, 
-                            rest_mangled_flux - rest_mangled_error, 
-                            rest_mangled_flux + rest_mangled_error, 
-                            alpha=0.2,
-                            color=colour)
-            
-            # config
-            ax.set_ylabel(r'$F_{\lambda}$', fontsize=16)
-            ax.set_xlabel(r'Rest-frame days since $t_0$', fontsize=16)
-            ax.set_title(f'"{self.source}" SED source (z={self.z})', fontsize=16)
-            ax.tick_params('both', labelsize=14)
-        ax.legend(fontsize=14, framealpha=0)
-        plt.show()
-        
-    def plot_surface(self, minphase: float = None, maxphase: float = None, minwave: float = None, maxwave: float = None, 
-                     delta_phase: float = 2, delta_wave: float = 30, alpha: float = 1.):
+    def plot_sed_surface(self, minphase: float = None, maxphase: float = None, 
+                         minwave: float = None, maxwave: float = None, 
+                         delta_phase: float = 2, delta_wave: float = 30, 
+                         alpha: float = 1.):
         """Plots the mangled SED in the observer frame.
         
         Note: if running on jupyter lab, it is recommended to run with ipympl for an
         interactive plot (ipympl package required)
         >>> %matplotlib ipympl
-        >>> sedm.plot_surface()
+        >>> self.plot_sed_surface()
 
         Parameters
         ----------
@@ -576,7 +526,7 @@ class SEDMangler(object):
             maxwave = self.sed.maxwave * (1 + self.z)
 
         obs_phases = np.arange(minphase, maxphase + delta_phase, delta_phase)
-        obs_waves = np.arange(minwave, maxwave + delta_wave, delta_wave)
+        obs_waves = np.arange(minwave, maxwave + delta_wave, delta_wave).astype(float)
 
         FLUXES = self.sed.model.flux(obs_phases, obs_waves)
         PHASES, WAVES = np.meshgrid(obs_phases, obs_waves)
@@ -592,7 +542,7 @@ class SEDMangler(object):
 
         fig, ax = plt.subplots(subplot_kw={"projection": "3d"})
 
-        # Plot the 3D surface
+        # plot the 3D surface
         ax.plot_surface(PHASES, WAVES, FLUXES.T, edgecolor='royalblue', 
                         lw=0.5, rstride=8, cstride=8, alpha=alpha)
 
@@ -618,5 +568,95 @@ class SEDMangler(object):
 
         ax.set(xlim=(obs_phases.min(), obs_phases.max()), ylim=(obs_waves.min(), obs_waves.max()),
             xlabel='Observer-frame time', ylabel=r'Observer-frame wavelength ($\AA$)', zlabel=r'$F_{\lambda}$')
+        plt.tight_layout()
+        plt.show()
+        
+    def plot_magling_surface(self, minphase: float = None, maxphase: float = None, 
+                             minwave: float = None, maxwave: float = None, 
+                             delta_phase: float = 2, delta_wave: float = 30, 
+                             alpha: float = 0.5):
+        """Plots the mangling surface in the observer frame.
+        
+        Note: if running on jupyter lab, it is recommended to run with ipympl for an
+        interactive plot (ipympl package required)
+        >>> %matplotlib ipympl
+        >>> self.plot_magling_surface()
+
+        Parameters
+        ----------
+        minphase: Minimum observer-frame phase to plot.
+        maxphase: Maximum observer-frame phase to plot.
+        minwave: Minimum observer-frame wavelength to plot.
+        maxwave: Maximum observer-frame wavelength to plot.
+        delta_phase: Step in the phase axis.
+        delta_wave: Step in the wavelength axis.
+        alpha: Transparency of the surface.
+        """
+        if minphase is None:
+            minphase = self.sed.model.mintime()
+        if maxphase is None:
+            maxphase = self.sed.model.maxtime()
+        if minwave is None:
+            minwave = self.sed.minwave * (1 + self.z)
+        if maxwave is None:
+            maxwave = self.sed.maxwave * (1 + self.z)
+
+        obs_phases = np.arange(minphase, maxphase + delta_phase, delta_phase)
+        obs_waves = np.arange(minwave, maxwave + delta_wave, delta_wave).astype(float)
+        PHASES, WAVES = np.meshgrid(obs_phases, obs_waves)
+
+        # mangle the SED
+        mang_list = []
+        for phase in obs_phases:
+            pred_phases = np.array([phase] * len(obs_waves))
+            mang_epoch, _ = self.gp_predict(pred_phases, obs_waves)
+            mang_list.append(mang_epoch)
+        MANGLING_SURFACE = np.array(mang_list)
+
+        fig, ax = plt.subplots(subplot_kw={"projection": "3d"})
+        # plot the 3D surface
+        ax.plot_surface(PHASES, WAVES, MANGLING_SURFACE.T, edgecolor='royalblue', 
+                        lw=0.5, rstride=8, cstride=8, alpha=alpha)
+        # plot effect wavelength of the bands at rest frame
+        for eff_wave in np.unique(self.phot.eff_wave):
+            rest_waves = np.array([eff_wave] * len(obs_phases))
+            idwave = np.argmin(np.abs(obs_waves - eff_wave))
+            mangling_band = MANGLING_SURFACE.T[idwave]
+            idband = np.argmin(np.abs(self.phot.eff_wave - eff_wave))
+            # get band to plot with colour
+            band = self.phot.band[idband]
+            if band in filters_config.keys():
+                colour = filters_config[band]['colour']
+            else:
+                colour = None
+            ax.plot(obs_phases, rest_waves, mangling_band, color=colour)
+
+        # plot flux ratios (data / SED)
+        for band in self.bands:
+            if band in filters_config.keys():
+                colour = filters_config[band]['colour']
+            else:
+                colour = None
+            # create mask
+            phot_phase = self.phot.phase * (1 + self.z)
+            phase_mask = (minphase <= phot_phase) & (phot_phase <= maxphase)
+            phot_wave = self.phot.eff_wave * (1 + self.z)
+            wave_mask = (minwave <= phot_wave) & (phot_wave <= maxwave)
+            mask = (self.phase_mask) & (self.phot.band==band) & phase_mask& wave_mask
+            # apply mask
+            phot_phase = phot_phase[mask]
+            phot_wave = phot_wave[mask]
+            ratio_flux = self.ratio_flux[mask]
+            ratio_error = self.ratio_error[mask]
+            # plot
+            ax.errorbar(phot_phase, phot_wave, ratio_flux, ratio_error,
+                        ls='', marker='o', color=colour, label=band)
+
+        # Plot projections on the 'walls' of the graph.
+        ax.contour(PHASES, WAVES, MANGLING_SURFACE.T, zdir='x', offset=obs_phases.min(), cmap='viridis_r')
+        ax.contour(PHASES, WAVES, MANGLING_SURFACE.T, zdir='y', offset=obs_waves.max(), cmap='coolwarm')
+        ax.legend(fontsize=14, framealpha=0)
+        ax.set(xlim=(obs_phases.min(), obs_phases.max()), ylim=(obs_waves.min(), obs_waves.max()),
+            xlabel='Observer-frame time', ylabel=r'Observer-frame wavelength ($\AA$)', zlabel='Mangling Surface (data/model)')
         plt.tight_layout()
         plt.show()
