@@ -31,6 +31,7 @@ class SEDMangler(object):
                  data: str | pd.DataFrame | Table,
                  z: float,
                  mwebv: float = 0.0, 
+                 source: str = 'stretched-hsiao',
                 ):
         """
         Parameters
@@ -39,17 +40,16 @@ class SEDMangler(object):
         z: redshift.
         mwebv: Milky-Way dust extinction.
         phase_range: phase range to be used for the SED model. 
+        source: SED source model: 'stretched-hsiao' or 'hsiao+lu'.
         """
         self.z = z
         self.mwebv = mwebv
         self.phot = Photometry(data)
         self.bands = np.unique(self.phot.band)
-        self.source = 'stretched-hsiao'
+        self.source = source
         self.sed = SED(self.source, z, mwebv, np.unique(self.bands))
         # get the inital colour-stretch of the SED model
         self.st = np.copy(self.sed.st)
-        # initial fit; this sets t0 and sBV
-        self.fit_model()
         
     def _setup_phase_range(self):
         """Sets up the rest-frame phase range of the object.
@@ -60,28 +60,50 @@ class SEDMangler(object):
         self.phot.phase = (self.phot.time - self.t0) / (1 + self.z)
         # consider limits for the SED model
         min_phase = np.floor(np.max([self.phot.phase.min(),
-                                     self.sed.times.min() / self.sed.scale]
+                                     self.sed.times.min() * self.sed.scale]
                                     )
                              )
         max_phase = np.ceil(np.min([self.phot.phase.max(), 
-                                    self.sed.times.max() / self.sed.scale]
+                                    self.sed.times.max() * self.sed.scale]
                                    )
                             )
         # rest-frame phases
         self.pred_phase = np.arange(min_phase, max_phase + 0.1, 0.1)
         
-    def fit_model(self):
+    def fit_model(self, t0: float = None):
         """Fits the Source SED model to the photometry.
+        
+        Parameters
+        ----------
+        t0: initial guess for the reference time of the SED model.
         """
         # select parameters to fit
         params_to_exclude = ['z', 'mwebv', 'mwr_v']
         parameters = [param for param in self.sed.model.param_names 
                       if param not in params_to_exclude]
         # fit model
-        result, fitted_model = sncosmo.fit_lc(self.phot.data, 
-                                              self.sed.model, 
-                                              parameters,
-                                             )
+        if t0 is not None:
+            bounds={'t0':(t0 - 5, t0 + 5)}
+        else:
+            bounds = None
+        data = self.phot.data.copy()
+        try:
+            result, fitted_model = sncosmo.fit_lc(self.phot.data, 
+                                                  self.sed.model, 
+                                                  parameters,
+                                                  bounds=bounds,
+                                                  )
+        except:
+            bands = [band for band in self.bands.copy() if band.endswith('b') | 
+                     band.endswith('g') | band.endswith('v')
+                     ]
+            data_ = data[np.isin(data['band'], bands)]
+            result, fitted_model = sncosmo.fit_lc(data_, 
+                                                  self.sed.model, 
+                                                  parameters,
+                                                  bounds=bounds,
+                                                  )
+                    
         # get t0 and results
         id_t0 = result.param_names.index("t0")
         self.t0 = result.parameters[id_t0]
@@ -101,7 +123,7 @@ class SEDMangler(object):
                         errors=self.result.errors)
 
     def mangle_sed(self, k1: str = 'ExpSquared', fit_mean: bool = True, 
-                   time_scale: float = None, wave_scale: float = None):
+                   time_scale: float = None, wave_scale: float = None, t0: float = None):
         """Modifies the SED model to match the observations using Gaussian Process (GP) 
         regression.
 
@@ -109,7 +131,10 @@ class SEDMangler(object):
         ----------
         k1: GP kernel for the time axis.
         fit_mean: whether to fit a mean function (constant).
+        t0: initial guess for the reference time of the SED model.
         """   
+        # initial fit; this sets t0 and sBV
+        self.fit_model(t0=t0)
         # get phase range to use 
         self.phase_mask = ((self.pred_phase.min() <= self.phot.phase) & 
                             (self.phot.phase <=  self.pred_phase.max()
@@ -120,7 +145,7 @@ class SEDMangler(object):
                                             self.phot.phase * (1 + self.z),
                                             zp=self.phot.zp, 
                                             zpsys=self.phot.zpsys)
-        # sometimes the model give zero flux
+        # sometimes the model gives zero flux
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             self.ratio_flux = self.phot.flux / model_flux
@@ -169,9 +194,9 @@ class SEDMangler(object):
         # error propagation
         prefactor = 2.5 / np.log(10)
         var_colour = (
-            (np.diag(cov_11) / (f1 ** 2)) +
-            (np.diag(cov_22) / (f2 ** 2)) -
-            2 * np.diag(cov_12) / (f1 * f2)
+            (np.diag(cov_11) / (f1 ** 2)) +  # variance
+            (np.diag(cov_22) / (f2 ** 2)) -  # variance
+            2 * np.diag(cov_12) / (f1 * f2)  # covariance
         ) * (prefactor ** 2)
 
         colour = -2.5 * np.log10(f1 / f2) + (zp1 - zp2)

@@ -1,11 +1,21 @@
+import yaml
 import numpy as np
+from pathlib import Path
 from copy import deepcopy
 import matplotlib.pyplot as plt
 import sncosmo
+import mangler
 
 plt.rcParams["font.family"] = "P052"
 plt.rcParams['mathtext.fontset'] = "cm"
 
+###############
+# Plot Config #
+###############
+mangler_dir = Path(mangler.__path__[0])
+with open(mangler_dir / 'filters.yml', 'r') as file:
+    filters_config = yaml.safe_load(file)
+    
 class SED(object):
     """Creates a Spectral Energy Distribution (SED) object from
     an sncosmo source.
@@ -36,7 +46,6 @@ class SED(object):
         # set bands and plot params
         self.bands = bands
         self._set_wavelength_coverage()
-        self.colours = {'ztf::g':"green", 'ztf::r':"red", 'ztf::i':"gold"}
         # time range
         mintime = np.max([-10, self.rest_model.mintime()])
         maxtime = np.min([90, self.rest_model.maxtime()])
@@ -96,8 +105,8 @@ class SED(object):
         # plot light curves
         fig, ax = plt.subplots(figsize=(6, 4))
         for band in self.bands:
-            if band in self.colours:
-                colour = self.colours[band]
+            if band in filters_config.keys():
+                colour = filters_config[band]['colour']
             else:
                 colour = None
             mag = model.bandmag(band, zpsys, times)
@@ -135,9 +144,13 @@ class SED(object):
         # plot filters
         ax2 = ax.twinx() 
         for band in self.bands:
+            if band in filters_config.keys():
+                colour = filters_config[band]['colour']
+            else:
+                colour = None
             band_wave = sncosmo.get_bandpass(band).wave
             band_trans = sncosmo.get_bandpass(band).trans
-            ax2.plot(band_wave, band_trans, color=self.colours[band], alpha=0.4)
+            ax2.plot(band_wave, band_trans, color=colour, alpha=0.4)
         # config
         ax.set_xlabel(r'Wavelength ($\AA$)', fontsize=16)
         ax.set_ylabel(r'$F_{\lambda}$', fontsize=16)
@@ -155,7 +168,11 @@ class SED(object):
         """
         # plot
         fig, ax = plt.subplots(figsize=(6, 4))
-        for band, colour in self.colours.items():
+        for band in self.bands:
+            if band in filters_config.keys():
+                colour = filters_config[band]['colour']
+            else:
+                colour = None
             rest_flux = self.rest_model.bandflux(band, self.times, zp=zp, zpsys=zpsys)
             flux = self.model.bandflux(band, self.times, zp=zp, zpsys=zpsys) 
             kcorr = -2.5 * np.log10(rest_flux / flux)
