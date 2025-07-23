@@ -154,7 +154,7 @@ class SEDMangler(object):
         # for phases in rest-frame: give phases in observer frame
         # for wavelength in rest-frame: give wavelength in rest-frame
         self.gp_model = fit_gp_model(self.phot.phase[self.phase_mask] * (1 + self.z), 
-                                     self.phot.eff_wave[self.phase_mask] * (1 + self.z), 
+                                     self.phot.eff_wave[self.phase_mask], 
                                      self.ratio_flux[self.phase_mask], 
                                      self.ratio_error[self.phase_mask], 
                                      k1=k1, fit_mean=fit_mean, 
@@ -249,8 +249,8 @@ class SEDMangler(object):
             zpsys2 = self.phot.zpsys[mask2][0]
         
         # wavelength array
-        pred_rest_wave = np.array([eff_wave1] * len(pred_obs_phase) + 
-                                  [eff_wave2] * len(pred_obs_phase) 
+        pred_rest_wave = np.array([eff_wave1 * (1 + self.z)] * len(pred_obs_phase) + 
+                                  [eff_wave2 * (1 + self.z)] * len(pred_obs_phase) 
                                   )
         # flux array
         rest_model_flux1 = self.sed.rest_model.bandflux(band1, 
@@ -265,6 +265,7 @@ class SEDMangler(object):
         # mangle rest-frame SED
         pred_obs_phase_ = np.r_[pred_obs_phase, pred_obs_phase]
         ratio_fit, cov_fit = self.gp_predict(pred_obs_phase_, pred_rest_wave, return_cov=True)
+        self.ratio_fit, self.cov_fit = ratio_fit, cov_fit
         rest_mangled_flux = rest_model_flux * ratio_fit
         rest_mangled_cov = np.outer(rest_model_flux, rest_model_flux) * cov_fit
         self.colour_flux_ratio = rest_mangled_flux
@@ -312,30 +313,6 @@ class SEDMangler(object):
         # divided by 30 assuming sBV
         st, st_err = st_phase / 30, np.std(st_list) / 30
         return st, st_err
-
-    def _compute_colour_stretch_OLD(self):
-        """Computes the colour stretch parameter for the bands used 
-        in the colour curve calculation.
-        """
-        # colour-stretch between 0.4 and 1.4 translate to phases between 12 and 42 days
-        # assuming sBV...
-        mask = (12 < self.pred_phase) & (self.pred_phase < 42)  
-        pred_phase = self.pred_phase[mask]
-        mask = np.array(list(mask) + list(mask))
-        fluxes = np.random.multivariate_normal(self.colour_flux_ratio[mask], 
-                                               self.colour_flux_cov[np.ix_(mask, mask)], 
-                                               size=1000)
-
-        # calculate mean and std through monte-carlo sampling
-        st_list = []
-        for flux in fluxes:
-            N = len(flux) // 2
-            f1 = flux[:N]
-            f2 = flux[N:]
-            colour = -2.5 * np.log10(f1 / f2)
-            st_idx = np.argmax(colour)
-            st_list.append(pred_phase[st_idx] / 30)
-        self.st, self.st_err = np.mean(st_list), np.std(st_list)
         
     def plot_fit(self, plot_mag: bool = False):
         """Plots the light-curve fit and ratio between the observations and SED.
@@ -368,7 +345,7 @@ class SEDMangler(object):
             ########################
             # observer-frame model #
             ########################            
-            pred_obs_wave = np.array([eff_wave * (1 + self.z)] * len(pred_obs_phase))
+            pred_obs_wave = np.array([eff_wave] * len(pred_obs_phase))
             obs_ratio_fit, obs_var_fit = self.gp_predict(pred_obs_phase, 
                                                          pred_obs_wave)
             obs_std_fit = np.sqrt(obs_var_fit)
@@ -469,7 +446,7 @@ class SEDMangler(object):
             ####################
             # rest-frame model #
             ####################
-            pred_rest_wave = np.array([eff_wave] * len(pred_rest_phase))
+            pred_rest_wave = np.array([eff_wave * (1 + self.z)] * len(pred_rest_phase))
             rest_ratio_fit, rest_var_fit = self.gp_predict(pred_obs_phase, pred_rest_wave)
             rest_std_fit = np.sqrt(rest_var_fit)
             # mangle SED
@@ -642,9 +619,9 @@ class SEDMangler(object):
         # plot the 3D surface
         ax.plot_surface(PHASES, WAVES, MANGLING_SURFACE.T, edgecolor='royalblue', 
                         lw=0.5, rstride=8, cstride=8, alpha=alpha)
-        # plot effect wavelength of the bands at rest frame
+        # plot effective wavelength of the bands at "rest frame"
         for eff_wave in np.unique(self.phot.eff_wave):
-            rest_waves = np.array([eff_wave] * len(obs_phases))
+            rest_waves = np.array([eff_wave * (1 + self.z)] * len(obs_phases))
             idwave = np.argmin(np.abs(obs_waves - eff_wave))
             mangling_band = MANGLING_SURFACE.T[idwave]
             idband = np.argmin(np.abs(self.phot.eff_wave - eff_wave))
@@ -665,7 +642,7 @@ class SEDMangler(object):
             # create mask
             phot_phase = self.phot.phase * (1 + self.z)
             phase_mask = (minphase <= phot_phase) & (phot_phase <= maxphase)
-            phot_wave = self.phot.eff_wave * (1 + self.z)
+            phot_wave = self.phot.eff_wave
             wave_mask = (minwave <= phot_wave) & (phot_wave <= maxwave)
             mask = (self.phase_mask) & (self.phot.band==band) & phase_mask& wave_mask
             # apply mask
