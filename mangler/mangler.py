@@ -123,7 +123,8 @@ class SEDMangler(object):
                         errors=self.result.errors)
 
     def mangle_sed(self, k1: str = 'ExpSquared', fit_mean: bool = True, 
-                   time_scale: float = None, wave_scale: float = None, t0: float = None):
+                   time_scale: float = None, wave_scale: float = None, 
+                   t0: float = None, st: float = None, fit: bool = True):
         """Modifies the SED model to match the observations using Gaussian Process (GP) 
         regression.
 
@@ -132,9 +133,17 @@ class SEDMangler(object):
         k1: GP kernel for the time axis.
         fit_mean: whether to fit a mean function (constant).
         t0: initial guess for the reference time of the SED model.
+        st: initial guess for the stretch of the SED model.
+        fit: whether to fit 't0' and 'st' before mangling.
         """   
         # initial fit; this sets t0 and sBV
-        self.fit_model(t0=t0)
+        if fit is True:
+            self.fit_model(t0=t0)
+        else:
+            self.t0 = t0
+            self.st = st
+            self.sed.set_st(self.st)
+            self._setup_phase_range()
         # get phase range to use 
         self.phase_mask = ((self.pred_phase.min() <= self.phot.phase) & 
                             (self.phot.phase <=  self.pred_phase.max()
