@@ -102,3 +102,9 @@ band = sncosmo.get_bandpass("cspjs")
 sncosmo.register(band, 'csp::j', force=True)
 band = sncosmo.get_bandpass("csphs")
 sncosmo.register(band, 'csp::h', force=True)
+
+# ATLAS bands
+band = sncosmo.get_bandpass("atlasc")
+sncosmo.register(band, 'atlas::c', force=True)
+band = sncosmo.get_bandpass("atlaso")
+sncosmo.register(band, 'atlas::o', force=True)

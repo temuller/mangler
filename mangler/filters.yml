@@ -36,3 +36,10 @@ csp::j:
 csp::h:
   colour: 'slateblue'
   marker: 'o'
+# ATLAS
+atlas::c:
+  colour: 'cyan'
+  marker: 'o'
+atlas::o:
+  colour: 'orange'
+  marker: 'o'
